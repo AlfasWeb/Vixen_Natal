@@ -18,26 +18,19 @@
 
 #define ONMIN 235
 
-bool invertPCF[QTDE_PCF] = { false, true };
+bool invertPCF[QTDE_PCF] = { true, true };
 
 Adafruit_PCF8574 pcfs[QTDE_PCF];
 CRGB leds1[NUM_LEDS1];
 CRGB leds2[NUM_LEDS2];
 
-// -------------------------
-// Buffer de relés (24 bits)
-// -------------------------
+// Buffer para relés
 uint8_t bufferRele[(PORTAS_RELE + 7) / 8] = {0};
 
-// -------------------------
 unsigned long ultimaRecepcao = 0;
 const int TOTAL_CANAIS = PORTAS_RELE + (NUM_LEDS1 * 3) + (NUM_LEDS2 * 3);
 bool recebendoFrame = false;
 int canalAtual = 0;
-
-// ============================
-//  Funções auxiliares
-// ============================
 
 void ciWrite(byte pino, bool estado) {
   bitWrite(bufferRele[QTDE_PCF + pino / 8], pino % 8, estado ? 1 : 0);
@@ -52,7 +45,6 @@ void ciWrite(byte pino, bool estado) {
   digitalWrite(pinST_CP, HIGH);
 }
 
-// Set/clear bit no buffer de relés
 void setRele(int canal, bool estado) {
   int byteIdx = canal / 8;
   int bitIdx  = canal % 8;
@@ -60,7 +52,6 @@ void setRele(int canal, bool estado) {
   else        bufferRele[byteIdx] &= ~(1 << bitIdx);
 }
 
-// Atualiza todas as saídas (PCF + 74HC) a partir do buffer
 void atualizarRele() {
   for (int j = 0; j < QTDE_PCF * 8; j++) {
     int modulo = j / 8;
@@ -68,15 +59,12 @@ void atualizarRele() {
     bool estado = bufferRele[modulo] & (1 << pino);
     pcfs[modulo].digitalWrite(pino, invertPCF[modulo] ? !estado : estado);
   }
+
   for (int j = 0; j < QTDE_CI * 8; j++) {
     bool estado = bufferRele[QTDE_PCF + j / 8] & (1 << (j % 8));
     ciWrite(j, estado);
   }
 }
-
-// ============================
-//  Setup principal
-// ============================
 
 void setup() {
   Serial.begin(57600);
@@ -85,9 +73,10 @@ void setup() {
   pinMode(pinST_CP, OUTPUT);
   pinMode(pinDS, OUTPUT);
 
+  ultimaRecepcao = millis();   // *** impede standby no início ***
+
   Serial.println("🚀 Sistema iniciado. Aguardando '$'...");
 
-  // Inicializa PCFs
   for (int i = 0; i < QTDE_PCF; i++) {
     uint8_t endereco = 0x20 + i;
     pcfs[i].begin(endereco, &Wire);
@@ -97,10 +86,8 @@ void setup() {
     }
   }
 
-  // Inicializa 74HC595
   for (int i = 0; i < 8; i++) ciWrite(i, LOW);
 
-  // Inicializa LEDs
   FastLED.addLeds<WS2811, LED_PIN1, BRG>(leds1, NUM_LEDS1);
   FastLED.addLeds<WS2811, LED_PIN2, BRG>(leds2, NUM_LEDS2);
   FastLED.setBrightness(180);
@@ -109,11 +96,9 @@ void setup() {
   FastLED.show();
 }
 
-// ============================
-//  Loop principal
-// ============================
-
 void loop() {
+  static bool standbyAtivo = false;
+
   while (Serial.available()) {
     byte valor = Serial.read();
 
@@ -126,12 +111,9 @@ void loop() {
 
     if (!recebendoFrame) continue;
 
-    // === Relés ===
     if (canalAtual < PORTAS_RELE) {
       setRele(canalAtual, valor > ONMIN);
     }
-
-    // === LED 1 ===
     else if (canalAtual < PORTAS_RELE + NUM_LEDS1 * 3) {
       int idx = canalAtual - PORTAS_RELE;
       int led = idx / 3;
@@ -140,8 +122,6 @@ void loop() {
       else if (comp == 1) leds1[led].g = valor;
       else leds1[led].b = valor;
     }
-
-    // === LED 2 ===
     else if (canalAtual < PORTAS_RELE + (NUM_LEDS1 + NUM_LEDS2) * 3) {
       int idx = canalAtual - PORTAS_RELE - NUM_LEDS1 * 3;
       int led = idx / 3;
@@ -154,7 +134,6 @@ void loop() {
     canalAtual++;
     ultimaRecepcao = millis();
 
-    // Frame completo
     if (canalAtual >= TOTAL_CANAIS) {
       recebendoFrame = false;
       canalAtual = 0;
@@ -162,31 +141,57 @@ void loop() {
     }
   }
 
-  // Se o frame travar, reseta recepção
   if (recebendoFrame && millis() - ultimaRecepcao > 100) {
     recebendoFrame = false;
     canalAtual = 0;
   }
 
-  // === Atualiza saídas apenas após frame completo ===
+  // ================================
+  // ENTRADA EM STANDBY
+  // ================================
+  if (millis() - ultimaRecepcao > 2000) {
+
+    if (!standbyAtivo) {
+      standbyAtivo = true;
+
+      // Liga todos os reles
+      for (int j = 0; j < QTDE_PCF * 8; j++) {
+        int modulo = j / 8;
+        int pino = j % 8;
+        int levelOn = invertPCF[modulo] ? LOW : HIGH;
+        pcfs[modulo].digitalWrite(pino, levelOn);
+      }
+      for (int j = 0; j < QTDE_CI * 8; j++) {
+        ciWrite(j, HIGH);
+      }
+    }
+
+    // Efeito RGB
+    static uint8_t hue = 0;
+    static unsigned long lastStandby = 0;
+    if (millis() - lastStandby > 30) {
+      hue++;
+      fill_solid(leds1, NUM_LEDS1, CHSV(hue, 255, 200));
+      fill_solid(leds2, NUM_LEDS2, CHSV(hue + 64, 255, 200));
+      FastLED.show();
+      lastStandby = millis();
+    }
+
+    return; // impede atualização normal
+  }
+
+  // ================================
+  // SAIU DO STANDBY → ATUALIZA NORMAL
+  // ================================
+  if (standbyAtivo) {
+    standbyAtivo = false;
+  }
+
   static unsigned long lastUpdate = 0;
   if (!recebendoFrame && millis() - lastUpdate > 0) {
     atualizarRele();
     FastLED.show();
     digitalWrite(LED_STATUS, !digitalRead(LED_STATUS));
     lastUpdate = millis();
-  }
-
-  // === Efeito de standby (sem delay) ===
-  if (millis() - ultimaRecepcao > 2000) {
-    static uint8_t hue = 0;
-    static unsigned long lastStandby = 0;
-    if (millis() - lastStandby > 30) {
-      hue++;
-      fill_solid(leds1, NUM_LEDS1, CHSV(hue, 255, 40));
-      fill_solid(leds2, NUM_LEDS2, CHSV(hue + 64, 255, 40));
-      FastLED.show();
-      lastStandby = millis();
-    }
   }
 }
